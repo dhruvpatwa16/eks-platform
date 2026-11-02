@@ -1,25 +1,58 @@
 const express = require('express');
 const { Pool } = require('pg');
+const {
+  SecretsManagerClient,
+  GetSecretValueCommand,
+} = require('@aws-sdk/client-secrets-manager');
 
 const app = express();
 app.use(express.json());
 
-// DB settings come from environment variables (set by Kubernetes later).
-// With no DB_HOST the app still starts, so we can test the platform before RDS exists.
-const pool = process.env.DB_HOST
-  ? new Pool({
-      host: process.env.DB_HOST,
-      port: Number(process.env.DB_PORT || 5432),
-      database: process.env.DB_NAME,
-      user: process.env.DB_USER,
-      password: process.env.DB_PASSWORD,
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-    })
-  : null;
+const dbConfigured = Boolean(process.env.DB_HOST);
+let poolPromise = null;
+
+// Builds the DB pool. If DB_SECRET_ARN is set, the username and password are
+// read from AWS Secrets Manager using the pod's temporary IAM credentials.
+async function createPool() {
+  let user = process.env.DB_USER;
+  let password = process.env.DB_PASSWORD;
+
+  if (process.env.DB_SECRET_ARN) {
+    const client = new SecretsManagerClient({ region: process.env.AWS_REGION });
+    const out = await client.send(
+      new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN })
+    );
+    const secret = JSON.parse(out.SecretString);
+    user = secret.username;
+    password = secret.password;
+  }
+
+  return new Pool({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT || 5432),
+    database: process.env.DB_NAME,
+    user,
+    password,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  });
+}
+
+// Created lazily and cached. If it fails, the next request tries again,
+// so the app still starts when the database or secret isn't reachable yet.
+function getPool() {
+  if (!dbConfigured) return Promise.resolve(null);
+  if (!poolPromise) {
+    poolPromise = createPool().catch((err) => {
+      poolPromise = null;
+      throw err;
+    });
+  }
+  return poolPromise;
+}
 
 let tableReady = false;
-async function ensureTable() {
-  if (!pool || tableReady) return;
+async function ensureTable(pool) {
+  if (tableReady) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (
       id SERIAL PRIMARY KEY,
@@ -31,9 +64,11 @@ async function ensureTable() {
 }
 
 async function requireDb(req, res, next) {
-  if (!pool) return res.status(503).json({ error: 'database not configured' });
   try {
-    await ensureTable();
+    const pool = await getPool();
+    if (!pool) return res.status(503).json({ error: 'database not configured' });
+    await ensureTable(pool);
+    req.pool = pool;
     next();
   } catch (err) {
     console.error(err.message);
@@ -41,47 +76,54 @@ async function requireDb(req, res, next) {
   }
 }
 
-// Health check: always 200, reports DB state (used by probes and for demos)
+// Passes errors from async handlers to the error handler below
+const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+// Health check: always 200, reports the database state
 app.get('/health', async (req, res) => {
-  let db = 'not-configured';
-  if (pool) {
-    try {
-      await pool.query('SELECT 1');
-      db = 'up';
-    } catch {
-      db = 'down';
-    }
+  if (!dbConfigured) return res.json({ status: 'ok', db: 'not-configured' });
+  try {
+    const pool = await getPool();
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok', db: 'up' });
+  } catch (err) {
+    console.error(err.message);
+    res.json({ status: 'ok', db: 'down' });
   }
-  res.json({ status: 'ok', db });
 });
 
-app.get('/tasks', requireDb, async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM tasks ORDER BY id');
+app.get('/tasks', requireDb, wrap(async (req, res) => {
+  const { rows } = await req.pool.query('SELECT * FROM tasks ORDER BY id');
   res.json(rows);
-});
+}));
 
-app.post('/tasks', requireDb, async (req, res) => {
+app.post('/tasks', requireDb, wrap(async (req, res) => {
   const { title } = req.body;
   if (!title) return res.status(400).json({ error: 'title is required' });
-  const { rows } = await pool.query(
+  const { rows } = await req.pool.query(
     'INSERT INTO tasks (title) VALUES ($1) RETURNING *', [title]);
   res.status(201).json(rows[0]);
-});
+}));
 
-app.put('/tasks/:id', requireDb, async (req, res) => {
+app.put('/tasks/:id', requireDb, wrap(async (req, res) => {
   const { title, done } = req.body;
-  const { rows } = await pool.query(
+  const { rows } = await req.pool.query(
     `UPDATE tasks SET title = COALESCE($1, title), done = COALESCE($2, done)
      WHERE id = $3 RETURNING *`, [title, done, req.params.id]);
   if (!rows.length) return res.status(404).json({ error: 'not found' });
   res.json(rows[0]);
-});
+}));
 
-app.delete('/tasks/:id', requireDb, async (req, res) => {
-  const { rowCount } = await pool.query(
+app.delete('/tasks/:id', requireDb, wrap(async (req, res) => {
+  const { rowCount } = await req.pool.query(
     'DELETE FROM tasks WHERE id = $1', [req.params.id]);
   if (!rowCount) return res.status(404).json({ error: 'not found' });
   res.status(204).end();
+}));
+
+app.use((err, req, res, next) => {
+  console.error(err.message);
+  res.status(500).json({ error: 'internal error' });
 });
 
 const port = process.env.PORT || 3000;
