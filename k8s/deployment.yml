@@ -13,14 +13,18 @@ spec:
       labels:
         app: task-api
     spec:
+      serviceAccountName: task-api
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
       containers:
         - name: task-api
-          image: 499937073132.dkr.ecr.ap-south-1.amazonaws.com/task-api:fe02ecf7b33a7733257dd75b7038db1ba4e68f1e
+          image: 499937073132.dkr.ecr.ap-south-1.amazonaws.com/task-api:f6f5255ef606eb1bb5cf697d09eb609c73b57e89
           ports:
             - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: task-api-config
           readinessProbe:
             httpGet:
               path: /health
