@@ -19,7 +19,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: task-api
-          image: 499937073132.dkr.ecr.ap-south-1.amazonaws.com/task-api:9f4056710bea1a3f9600150261f3bf5507ec4a7e
+          image: 499937073132.dkr.ecr.ap-south-1.amazonaws.com/task-api:fd3075f9a97de1b1c7465afc311290e5d54180dc
           ports:
             - containerPort: 3000
           envFrom:
