@@ -1,4 +1,0 @@
-git status
-git add docs
-git commit -m "docs: add project screenshots"
-git push
