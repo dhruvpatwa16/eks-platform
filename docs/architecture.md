@@ -1,35 +1,35 @@
 # Architecture
 
+## 1. Delivery flow (from `git push` to a running update)
+
 ```mermaid
 flowchart LR
   dev["Developer"] -->|git push| gh["GitHub repo"]
-
-  subgraph CI["GitHub Actions"]
-    build["Build image"] --> tag["Update image tag in gitops/"]
-  end
-
-  gh --> build
-  tag -->|commit| gh
+  gh -->|triggers| build["GitHub Actions: build image"]
   build -->|OIDC role, no stored keys| ecr[("Amazon ECR")]
+  build -->|commit new image tag to gitops/| gh
+  gh -->|Argo CD watches gitops/| argo["Argo CD in EKS"]
+  argo -->|syncs manifests| pods["task-api pods"]
+  ecr -->|nodes pull the image| pods
+```
 
-  subgraph AWS["AWS ap-south-1"]
-    subgraph VPC["VPC, 2 AZs"]
-      alb["ALB, public subnets"]
-      subgraph EKS["EKS cluster, private subnets"]
-        lbc["Load Balancer Controller"]
-        argo["Argo CD"]
-        pods["task-api pods x2"]
-      end
-      rds[("RDS Postgres, private")]
+## 2. Runtime (how a request is served)
+
+```mermaid
+flowchart TB
+  user["User"] --> alb["ALB (public subnets)"]
+
+  subgraph VPC["VPC across 2 AZs"]
+    alb
+    subgraph EKS["EKS cluster (private subnets)"]
+      pods["task-api pods x2"]
+      lbc["AWS Load Balancer Controller"]
     end
-    sm["Secrets Manager"]
+    rds[("RDS Postgres (private subnets)")]
   end
 
-  user["User"] --> alb --> pods
-  lbc -->|creates from Ingress| alb
-  argo -->|watches gitops/| gh
-  argo -->|syncs manifests| pods
-  pods -->|nodes pull image| ecr
-  pods -->|Pod Identity, reads DB secret| sm
+  alb --> pods
+  lbc -. creates from Ingress .-> alb
   pods --> rds
+  pods -->|Pod Identity, no stored keys| sm["Secrets Manager (DB password)"]
 ```
