@@ -126,5 +126,9 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'internal error' });
 });
 
+app.get('/version', (req, res) => {
+  res.json({ version: 'v2', deployedBy: 'argo-cd' });
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`task-api listening on ${port}`));
